@@ -1,11 +1,61 @@
 use crate::gba::*;
 
+#[derive(Clone,Copy)]
 pub enum BusValue {
     Word(u32),
     HalfWord(u16),
     Byte(u8),
 }
 
+impl Into<u8> for BusValue {
+    fn into(self) -> u8 {
+        match self {
+            BusValue::Byte(b) => b,
+            BusValue::HalfWord(h) => (h & 0xFF) as u8,
+            BusValue::Word(w) => (w & 0xFF) as u8,
+        }
+    }
+}
+
+impl Into<u16> for BusValue {
+    fn into(self) -> u16 {
+        match self {
+            BusValue::Byte(b) => b as u16,
+            BusValue::HalfWord(h) => h,
+            BusValue::Word(w) => (w & 0xFFFF) as u16,
+        }
+    }
+}
+
+impl Into<u32> for BusValue {
+    fn into(self) -> u32 {
+        match self {
+            BusValue::Byte(b) => b as u32,
+            BusValue::HalfWord(h) => h as u32,
+            BusValue::Word(w) => w,
+        }
+    }
+}
+
+impl From<u8> for BusValue {
+    fn from(val: u8) -> BusValue {
+        BusValue::Byte(val)
+    }
+}
+
+impl From<u16> for BusValue {
+    fn from(val: u16) -> BusValue {
+        BusValue::HalfWord(val)
+    }
+}
+
+impl From<u32> for BusValue {
+    fn from(val: u32) -> BusValue {
+        BusValue::Word(val)
+    }
+}
+
+#[derive(Clone,Copy)]
 pub enum BusWidth {
     Word,
     HalfWord,
@@ -13,38 +63,6 @@ pub enum BusWidth {
 }
 
 impl GbaSystem {
-    pub fn get_bus_width(&self, adr: u32) -> Option<BusWidth> {
-        match adr {
-            // General internal memory
-            0x00000000..=0x00003FFF => Some(BusWidth::Word),
-            0x00004000..=0x01FFFFFF => None, // Reserved
-            0x02000000..=0x0203FFFF => Some(BusWidth::HalfWord),
-            0x02040000..=0x02FFFFFF => None, // Reserved
-            0x03000000..=0x03007FFF => Some(BusWidth::Word),
-            0x03008000..=0x03FFFFFF => None, // Reserved
-            0x04000000..=0x040003FE => Some(BusWidth::Word),
-            0x04000400..=0x04FFFFFF => None, // Reserved
-
-            // Internal display memory
-            0x05000000..=0x050003FF => Some(BusWidth::HalfWord),
-            0x05000400..=0x05FFFFFF => None, // Reserved
-            0x06000000..=0x06017FFF => Some(BusWidth::HalfWord),
-            0x06018000..=0x06FFFFFF => None, // Reserved
-            0x07000000..=0x070003FF => Some(BusWidth::Word),
-            0x07000400..=0x07FFFFFF => None, // Reserved
-
-            // External memory
-            0x08000000..=0x09FFFFFF => Some(BusWidth::HalfWord),
-            0x0A000000..=0x0BFFFFFF => Some(BusWidth::HalfWord),
-            0x0C000000..=0x0DFFFFFF => Some(BusWidth::HalfWord),
-            0x0E000000..=0x0E00FFFF => Some(BusWidth::Byte),
-            0x0E010000..=0x0FFFFFFF => None, // Reserved
-
-            // Unused area
-            _ => None
-        }
-    }
-
     pub fn read_bus(&mut self, adr: u32) -> Option<BusValue> {
         match adr {
             // General internal memory
@@ -52,7 +70,8 @@ impl GbaSystem {
             0x00004000..=0x01FFFFFF => None, // Reserved
             0x02000000..=0x02FFFFFF => Some(BusValue::HalfWord(self.ewram[((adr & 0x03FFFF) >> 2) as usize])),
             0x03000000..=0x03FFFFFF => Some(BusValue::Word(self.iwram[((adr & 0x07FFF) >> 2) as usize])),
-            0x04000000..=0x04FFFFFF => Some(BusValue::Word(self.io[((adr & 0xFFFF) >> 2) as usize])),
+            0x04000000..=0x04000800 => self.io_register.read_register(adr & 0x7FE), //Some(BusValue::Word(self.io[((adr & 0x7FF) >> 2) as usize])),
+            0x04000801..=0x04FFFFFF => None,
 
             // Internal display memory
             0x05000000..=0x050003FF => Some(BusValue::HalfWord(self.pram[((adr - 0x05000000) >> 1) as usize])),
@@ -132,6 +151,8 @@ impl GbaSystem {
     }
 
     pub fn write_bus(&mut self, adr: u32, write_val: BusValue) -> Result<(),()> {
+        assert_eq!(adr & 0x1, 0, "Memory access unaligned!");
+
         match self.read_bus(adr) {
             Some(BusValue::Byte(_)) => match write_val {
                 BusValue::Byte(_) => self.write_bus_raw(adr, write_val),
@@ -168,8 +189,8 @@ impl GbaSystem {
                 BusValue::Word(write_val) => {
                     let data = write_val.to_le_bytes();
 
-                    self.write_bus_raw(adr, BusValue::HalfWord(u16::from_le_bytes(data[0..1].try_into().unwrap())))?;
-                    self.write_bus_raw(adr, BusValue::HalfWord(u16::from_le_bytes(data[2..3].try_into().unwrap())))?;
+                    self.write_bus_raw(adr, BusValue::HalfWord(u16::from_le_bytes(data[0..2].try_into().unwrap())))?;
+                    self.write_bus_raw(adr, BusValue::HalfWord(u16::from_le_bytes(data[2..4].try_into().unwrap())))?;
                     Ok(())
                 },
             },
@@ -196,7 +217,7 @@ impl GbaSystem {
                     Ok(())
                 },
             },
-            None => Err(())
+            None => self.write_bus_raw(adr, write_val),
         }
     }
 
@@ -220,13 +241,15 @@ impl GbaSystem {
                 }?;
                 Ok(())
             },
-            0x04000000..=0x04FFFFFF => {
-                self.io[((adr & 0xFFFF) >> 2) as usize] = match val {
+            0x04000000..=0x04000800 => {
+                self.io_register.write_register(adr & 0x7FE, val)
+                /*self.io[((adr & 0x7FF) >> 2) as usize] = match val {
                     BusValue::Word(v) => Ok(v),
                     _ => Err(()),
                 }?;
-                Ok(())
+                Ok(())*/
             },
+            0x04000801..=0x04FFFFFF => Err(()),
 
             // Internal display memory
             0x05000000..=0x050003FF => {
