@@ -22,5 +22,4 @@ opt-level = 3
 
 [dependencies.sdl2]
 version = "0.35.2"
-default-features = false
-features = ["ttf","image","gfx","mixer"]
+default-features = true

@@ -7,7 +7,7 @@ use gdbstub::target::ext::base::BaseOps;
 use gdbstub::target::ext::base::singlethread::{SingleThreadBase, SingleThreadResume, SingleThreadSingleStep, SingleThreadResumeOps};
 use gdbstub::target::ext::breakpoints::{SwBreakpointOps, Breakpoints, SwBreakpoint, BreakpointsOps};
 use nom::AsBytes;
-use tokio::net::unix::pipe::Receiver;
+use tokio::sync::watch::Receiver;
 use std::fmt;
 use std::sync::mpsc::{Sender};
 use std::sync::{mpsc, Arc};
@@ -17,7 +17,7 @@ use std::time::Duration;
 pub struct GbaTarget {
     pub emulation_tx_channel: Sender<GbaDebugCommand>,
     pub signal_tx_channel: Sender<Signal>,
-    pub state_rx_channel: tokio::sync::watch::Receiver<Option<SingleThreadStopReason<u32>>>,
+    pub state_rx_channel: Receiver<Option<SingleThreadStopReason<u32>>>,
 }
 
 pub enum GbaDebugCommandResult {

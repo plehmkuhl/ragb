@@ -16,10 +16,10 @@ use crate::arm::ProgramStatus;
 use crate::gba::*;
 use crate::gdb::{ GbaDebugCommand, GbaDebugCommandResult };
 
-use gl::types::{GLenum, GLuint, GLint, GLchar, GLfloat, GLsizeiptr, GLboolean};
+use gl::types::{GLenum, GLuint, GLint, GLchar, GLfloat, GLsizeiptr, GLboolean, GLsizei};
 use tokio::sync::watch;
 
-use std::ffi::CString;
+use std::ffi::{CString, c_void};
 use std::{fs, ptr};
 use std::mem;
 use std::rc::Rc;
@@ -39,8 +39,10 @@ use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::render::TextureQuery;
 
+// Last known good adr: 5B6
+
 fn wait_for_gdb_connection(port: u16) -> io::Result<TcpStream> {
-    let sockaddr = format!("localhost:{}", port);
+    let sockaddr = format!("0.0.0.0:{}", port);
     eprintln!("Waiting for a GDB connection on {:?}...", sockaddr);
     let sock = TcpListener::bind(sockaddr)?;
     let (stream, addr) = sock.accept()?;
@@ -71,7 +73,8 @@ fn compile_shader(src: &[u8], ty: GLenum) -> GLuint {
             let mut len = 0;
             gl::GetShaderiv(shader, gl::INFO_LOG_LENGTH, &mut len);
             let mut buf = Vec::new();
-            buf.set_len((len as usize) - 1);
+            buf.resize((len as usize) - 1, 0);
+            assert!(gl::GetShaderInfoLog::is_loaded());
             gl::GetShaderInfoLog(shader, len, ptr::null_mut(), buf.as_mut_ptr() as *mut GLchar);
             panic!("{}", String::from_utf8(buf).ok().expect("ShaderInfoLog not valid utf8"));
         }
@@ -96,13 +99,39 @@ fn link_program(vs: GLuint, fs: GLuint) -> GLuint {
             let mut len: GLint = 0;
             gl::GetProgramiv(program, gl::INFO_LOG_LENGTH, &mut len);
             let mut buf = Vec::new();
-            buf.set_len((len as usize) - 1);
+            buf.resize((len as usize) - 1, 0);
             gl::GetProgramInfoLog(program, len, ptr::null_mut(), buf.as_mut_ptr() as *mut GLchar);
             panic!("{}", String::from_utf8(buf).ok().expect("ProgramInfoLog not valid utf8"));
         }
 
+        gl::DetachShader(program, vs);
+        gl::DetachShader(program, fs);
+
         program
     }
+}
+
+#[repr(C)]
+struct bg_control_data {
+    pub priority: u32,
+    pub character_base: u32,
+    pub mosaic: bool,
+    pub hi_color_palette: bool,
+    pub screen_base_block: u32,
+}
+
+struct lcd_control_data {
+    pub bg_mode: u32,
+    pub frame_select: u32,
+    pub one_dimensional_vram_mapping: bool,
+    pub forced_blank: bool,
+    pub display_bg0: bool,
+    pub display_bg1: bool,
+    pub display_bg2: bool,
+    pub display_bg3: bool,
+    pub display_window_0: bool,
+    pub display_window_1: bool,
+    pub display_obj: bool,
 }
 
 fn main() {
@@ -111,12 +140,12 @@ fn main() {
     let video_subsystem = sdl_context.video().unwrap();
 
     video_subsystem.gl_attr().set_context_profile(sdl2::video::GLProfile::Core);
-    video_subsystem.gl_attr().set_context_version(3, 2);
+    video_subsystem.gl_attr().set_context_version(4, 3);
 
     // Create GL window and context
-    let window = video_subsystem.window("Ragb", 800, 600)
+    let window = video_subsystem.window("Ragb", 240+68, 160+68)
         .opengl()
-        .resizable()
+        //.resizable()
         .build()
         .unwrap();
 
@@ -127,13 +156,22 @@ fn main() {
     //video_subsystem.gl_set_swap_interval(1).unwrap();
 
     // Compile shader
-    let vs = compile_shader(fs::read("shader/vertex_shader.glsl").unwrap().as_slice(), gl::VERTEX_SHADER);
-    let fs = compile_shader(fs::read("shader/fragment_shader.glsl").unwrap().as_slice(), gl::FRAGMENT_SHADER);
+    let vs = compile_shader(fs::read("shader/vertex_shader.vert").unwrap().as_slice(), gl::VERTEX_SHADER);
+    let fs = compile_shader(fs::read("shader/fragment_shader.frag").unwrap().as_slice(), gl::FRAGMENT_SHADER);
+    let screen_shader = compile_shader(fs::read("shader/screen.frag").unwrap().as_slice(), gl::FRAGMENT_SHADER);
 
     let program = link_program(vs, fs);
+    let screen_program = link_program(vs, screen_shader);
+
+    // Sync channels
+    let (video_events_tx, video_events_rx) = mpsc::channel::<VideoEvent>();
+    let (gdb_tx, gdb_rx) = mpsc::channel::<gdb::GbaDebugCommand>();
+    let (signal_tx, signal_rx) = mpsc::channel::<Signal>();
+    let (state_tx, state_rx) = watch::channel::<Option<SingleThreadStopReason<u32>>>(None);
+
 
     // Init emulator
-    let mut gba = GbaSystem::new();
+    let mut gba = GbaSystem::new(video_events_tx);
 
     // Print table
     for n in &gba.instruction_table {
@@ -151,13 +189,10 @@ fn main() {
         gba.bios[n] = u32::from_ne_bytes(bios[adr..(adr+4)].try_into().unwrap()).to_le();
     }
 
+    gba.load_gamepack("arm_test.gba").unwrap();
+
     // Perform a system reset
     gba.reset();
-
-    let (ui_tx, ui_rx) = mpsc::channel::<()>();
-    let (gdb_tx, gdb_rx) = mpsc::channel::<gdb::GbaDebugCommand>();
-    let (signal_tx, signal_rx) = mpsc::channel::<Signal>();
-    let (state_tx, state_rx) = watch::channel::<Option<SingleThreadStopReason<u32>>>(None);
 
     // Immediately send the SIGINT signal to the emulation thread
     let _ = signal_tx.send(Signal::SIGINT);
@@ -227,7 +262,6 @@ fn main() {
                             }
                         }
             
-                        let _ = ui_tx.send(());
                         accumulator += CPU_TICKS_PER_SECOND;
                     }
                 },
@@ -361,10 +395,16 @@ fn main() {
     let mut vbo = 0;
 
     static VERTEX_DATA: [GLfloat; 8] = [
-        0.0,  0.0,
-        0.0,  1.0,
-        1.0,  1.0,
-        1.0,  0.0];
+        1.0, -1.0,
+        1.0, 1.0,
+        -1.0, -1.0,
+        -1.0, 1.0
+    ];
+     /*[GLfloat; 12] = [
+        -1.0,  -1.0, 0.0,
+        -1.0,  1.0, 0.0,
+        1.0,  1.0, 0.0,
+        1.0,  -1.0, 0.0];*/
 
     unsafe {
         // Create Vertex Array Object
@@ -381,19 +421,55 @@ fn main() {
 
         // Use shader program
         gl::UseProgram(program);
-        gl::BindFragDataLocation(program, 0,
-            CString::new("out_color").unwrap().as_ptr());
         
         // Specify the layout of the vertex data
-        let pos_attr = gl::GetAttribLocation(program, CString::new("position").unwrap().as_ptr());
-        gl::EnableVertexAttribArray(pos_attr as GLuint);
-        gl::VertexAttribPointer(pos_attr as GLuint, 2, gl::FLOAT, gl::FALSE as GLboolean, 0, ptr::null());
+        gl::EnableVertexAttribArray(0);
+        gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
+        gl::VertexAttribPointer(0, 2, gl::FLOAT, gl::FALSE, 0, ptr::null());
     }
 
     unsafe {
-        gl::Viewport(0, 0, 240+68, 160+68);
-        gl::ClearColor(0.3, 0.3, 0.3, 1.0);
+        //gl::Viewport(0, 0, 240+68, 160+68);
+        gl::ClearColor(0.1, 0.1, 0.1, 1.0);
     }
+
+    // Prepare render target
+    let mut framebuffer: GLuint = 0;
+    let mut rendered_texture: GLuint = 0;
+
+    unsafe {
+        gl::GenFramebuffers(1, &mut framebuffer);
+        gl::BindFramebuffer(gl::FRAMEBUFFER, framebuffer);
+
+        gl::GenTextures(1, &mut rendered_texture);
+        gl::BindTexture(gl::TEXTURE_2D, rendered_texture);
+        gl::TexImage2D(gl::TEXTURE_2D, 0, gl::RGB as i32, 512, 512, 0, gl::RGB, gl::UNSIGNED_BYTE, ptr::null());
+
+        gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::NEAREST as i32);
+        gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::NEAREST as i32);
+
+        gl::FramebufferTexture(gl::FRAMEBUFFER, gl::COLOR_ATTACHMENT0, rendered_texture, 0);
+
+        let draw_buffers: &[GLenum] = &[gl::COLOR_ATTACHMENT0];
+        gl::DrawBuffers(1, draw_buffers.as_ptr());
+
+        gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
+    }
+
+    // Setup video memory
+    let mut video_ssbo = Vec::<u32>::new();
+    video_ssbo.resize(98 * 1024, 0);
+
+    let mut video_ssbo_buffer: GLuint = 0;
+    let mut lcd_ctrl_ssbo_buffer: GLuint = 0;
+    let mut bg_ctrl_ssbo_buffer: GLuint = 0;
+
+    unsafe {
+        gl::GenBuffers(1, &mut video_ssbo_buffer);
+        gl::GenBuffers(1, &mut lcd_ctrl_ssbo_buffer);
+        gl::GenBuffers(1, &mut bg_ctrl_ssbo_buffer);
+    }
+
 
     let mut event_pump = sdl_context.event_pump().unwrap();
     'running: loop {
@@ -406,13 +482,80 @@ fn main() {
             }
         } 
 
-        let _ = ui_rx.recv();
 
-        // Render screen
+
+        while let Ok(evt) = video_events_rx.try_recv() {
+            match evt {
+                VideoEvent::VRamUpdate { start_address, data } => {
+                    let mut address = 1024 + start_address as usize;
+
+                    for v in data {
+                        let b = v.to_le_bytes();
+                        video_ssbo[address] = b[0] as u32;
+                        video_ssbo[address + 1] = b[1] as u32;
+
+                        address += 2;
+                    }
+                },
+                VideoEvent::PRamUpdate { start_address, data } => {
+                    let mut address = 0 + start_address as usize;
+
+                    for v in data {
+                        let b = v.to_le_bytes();
+                        video_ssbo[address] = b[0] as u32;
+                        video_ssbo[address + 1] = b[1] as u32;
+
+                        address += 2;
+                    }
+                },
+                VideoEvent::ORamUpdate { start_address, data } => {
+                    let mut address = 99328 + start_address as usize;
+
+                    for v in data {
+                        let b = v.to_le_bytes();
+                        video_ssbo[address] = b[0] as u32;
+                        video_ssbo[address + 1] = b[1] as u32;
+                        video_ssbo[address + 2] = b[2] as u32;
+                        video_ssbo[address + 3] = b[3] as u32;
+
+                        address += 4;
+                    }
+                },
+                VideoEvent::FrameUpdate => {
+                    // Render display to framebuffer
+                    unsafe {
+                        gl::BindFramebuffer(gl::FRAMEBUFFER, framebuffer);
+                        gl::Viewport(0, 0, 512, 512);
+
+                        gl::Clear(gl::COLOR_BUFFER_BIT);
+
+                        gl::UseProgram(program);
+
+                        // Upload vram
+                        gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, video_ssbo_buffer);
+                        gl::BufferData(gl::SHADER_STORAGE_BUFFER, (video_ssbo.len() * mem::size_of::<u32>()) as isize, video_ssbo.as_ptr() as *const c_void, gl::STATIC_READ);
+                        gl::BindBufferBase(gl::SHADER_STORAGE_BUFFER, 0, video_ssbo_buffer);
+
+                        gl::MemoryBarrier(gl::SHADER_STORAGE_BARRIER_BIT);
+                        gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, 0);
+
+                        gl::DrawArrays(gl::TRIANGLE_STRIP, 0, 4);
+
+                        gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
+                    }
+                }
+            }
+        }
+        
         unsafe {
-            gl::Clear(gl::COLOR_BUFFER_BIT);
+            gl::Viewport(0, 0, window.size().0 as GLsizei, window.size().1 as GLsizei);
+            gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
 
-            gl::DrawArrays(gl::QUADS, 0, 4);
+            gl::UseProgram(screen_program);
+            gl::ActiveTexture(gl::TEXTURE0);
+            gl::BindTexture(gl::TEXTURE_2D, rendered_texture);
+
+            gl::DrawArrays(gl::TRIANGLE_STRIP, 0, 4);
         }
 
         window.gl_swap_window();

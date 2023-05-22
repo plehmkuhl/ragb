@@ -2,6 +2,7 @@ use crate::gba::*;
 use crate::decode_arm::*;
 use crate::arm::ProgramStatus;
 use std::fmt;
+use std::ops::BitAnd;
 
 pub fn sign_extend(val: u32, bits: usize) -> i32 {
     if val & (1 << (bits - 1)) != 0 {
@@ -13,6 +14,14 @@ pub fn sign_extend(val: u32, bits: usize) -> i32 {
         n_val as i32
     } else {
         val as i32
+    }
+}
+
+fn bit_test(r: u32, b: u32) -> Option<bool> {
+    if b > 32 {
+        None
+    } else {
+        Some((r & (1 << b)) != 0)
     }
 }
 
@@ -28,22 +37,39 @@ impl GbaSystem {
         match shifter_operand {
             &DPShifterOperand::Immediate { rotate, immed } => {
                 let s = (immed as u32).rotate_right(rotate as u32 * 2);
-                (s, (s & 0x80000000) != 0)
+                (s, if rotate == 0 { self.cpsr.contains(ProgramStatus::FLAG_C) } else { (s & 0x80000000) != 0 })
             },
             &DPShifterOperand::ImmediateShift { immed, shift_type, rm } => {
                 match shift_type {
                     ShiftType::ASR => {
-                        let s = (self.read_register(rm) as i32).overflowing_shr(immed.into());
-                        (s.0 as u32, s.1)
+                        if immed == 0 {
+                            if (self.read_register(rm) & 0x80000000) == 0 {
+                                (0, false)
+                            } else {
+                                (0xFFFFFFFF, true)
+                            }
+                        } else {
+                            let s = (self.read_register(rm) as i32).overflowing_shr(immed.into());
+                            (s.0 as u32, s.1)
+                        }
                     },
-                    ShiftType::LSL => 
+                    ShiftType::LSL => {
                         if immed == 0 {
                             (self.read_register(rm), self.cpsr.contains(ProgramStatus::FLAG_C))
                         } else {
-                            self.read_register(rm).overflowing_shl(immed.into())
-                        },
-                    ShiftType::LSR => self.read_register(rm).overflowing_shr(immed.into()),
-                    ShiftType::ROR => (self.read_register(rm).rotate_right(immed.into()), false),
+                            (self.read_register(rm).overflowing_shl(immed.into()).0, bit_test(self.read_register(rm), 32 - immed as u32).unwrap_or(false))
+                        }
+                    },
+                    ShiftType::LSR => {
+                        if immed == 0 {
+                            (0, (self.read_register(rm) & 0x80000000) != 0)
+                        } else {
+                            (self.read_register(rm).overflowing_shr(immed.into()).0, bit_test(self.read_register(rm), immed as u32 - 1).unwrap_or(false))
+                        }
+                    },
+                    ShiftType::ROR => {
+                        (self.read_register(rm).rotate_right(immed.into()), false)
+                    },
                     ShiftType::RRX => {
                         let s = self.read_register(rm).rotate_right(immed.into());
                         let c = self.cpsr.contains(ProgramStatus::FLAG_C);
@@ -53,14 +79,54 @@ impl GbaSystem {
                 }
             },
             &DPShifterOperand::RegisterShift { rs, shift_type, rm } => {
+                let rs_val = self.read_register(rs) & 0xFF;
+
                 match shift_type {
                     ShiftType::ASR => {
-                        let s = (self.read_register(rm) as i32).overflowing_shr(self.read_register(rs));
-                        (s.0 as u32, s.1)
+                        if rs_val == 0 {
+                            (0, self.cpsr.contains(ProgramStatus::FLAG_C))
+                        } else if rs_val < 32 {
+                            let s = (self.read_register(rm) as i32).overflowing_shr(self.read_register(rs));
+                            (s.0 as u32, s.1)
+                        } else {
+                            if (self.read_register(rm) & 0x80000000) == 0 {
+                                (0, false)
+                            } else {
+                                (0xFFFFFFFF, true)
+                            }
+                        }
                     },
-                    ShiftType::LSL => self.read_register(rm).overflowing_shl(self.read_register(rs)),
-                    ShiftType::LSR => self.read_register(rm).overflowing_shr(self.read_register(rs)),
-                    ShiftType::ROR => (self.read_register(rm).rotate_right(self.read_register(rs)), false),
+                    ShiftType::LSL => { 
+                        if rs_val == 0 {
+                            (self.read_register(rm), self.cpsr.contains(ProgramStatus::FLAG_C))
+                        } else if rs_val < 32 {
+                            (self.read_register(rm).overflowing_shl(rs_val).0, bit_test(self.read_register(rm), 32 - rs_val).unwrap())
+                        } else if rs_val == 32 {
+                            (0, (self.read_register(rm) & 0x1) != 0)
+                        } else {
+                            (0, false)
+                        }
+                    },
+                    ShiftType::LSR => {
+                        if rs_val == 0 {
+                            (self.read_register(rm), self.cpsr.contains(ProgramStatus::FLAG_C))
+                        } else if rs_val < 32 {
+                            (self.read_register(rm).overflowing_shr(rs_val).0, bit_test(self.read_register(rm), rs_val - 1).unwrap_or(false))
+                        } else if rs_val == 32 {
+                            (0, (self.read_register(rm) & 0x1) != 0)
+                        } else {
+                            (0, false)
+                        }
+                    },
+                    ShiftType::ROR => {
+                        if rs_val == 0 {
+                            (self.read_register(rm), self.cpsr.contains(ProgramStatus::FLAG_C))
+                        } else if (rs_val & 0x0F) == 0 {
+                            (self.read_register(rm), (self.read_register(rm) & 0x80000000) != 0)
+                        } else {
+                            (self.read_register(rm).rotate_right(self.read_register(rs)), false)
+                        }
+                    },
                     ShiftType::RRX => {
                         let s = if self.cpsr.contains(ProgramStatus::FLAG_C) { 1 } else { 0 } |
                         self.read_register(rm).overflowing_shr(1).0;
@@ -269,10 +335,7 @@ impl GbaSystem {
                     } else {
                         self.cpsr.set(ProgramStatus::FLAG_N, (self.read_register(rd) & 0x80000000) != 0);
                         self.cpsr.set(ProgramStatus::FLAG_Z, self.read_register(rd) == 0);
-
-                        if !self.cpsr.contains(ProgramStatus::FLAG_T) {
-                            self.cpsr.set(ProgramStatus::FLAG_C, shifter.1);
-                        }
+                        self.cpsr.set(ProgramStatus::FLAG_C, shifter.1);
                     }
                 }
             },

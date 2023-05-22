@@ -70,8 +70,7 @@ impl GbaSystem {
             0x00004000..=0x01FFFFFF => None, // Reserved
             0x02000000..=0x02FFFFFF => Some(BusValue::HalfWord(self.ewram[((adr & 0x03FFFF) >> 2) as usize])),
             0x03000000..=0x03FFFFFF => Some(BusValue::Word(self.iwram[((adr & 0x07FFF) >> 2) as usize])),
-            0x04000000..=0x04000800 => self.io_register.read_register(adr & 0x7FE), //Some(BusValue::Word(self.io[((adr & 0x7FF) >> 2) as usize])),
-            0x04000801..=0x04FFFFFF => None,
+            0x04000000..=0x04FFFFFF => self.io_register.read_register(adr & 0xFFFFFF), //Some(BusValue::Word(self.io[((adr & 0x7FF) >> 2) as usize])),
 
             // Internal display memory
             0x05000000..=0x050003FF => Some(BusValue::HalfWord(self.pram[((adr - 0x05000000) >> 1) as usize])),
@@ -241,15 +240,7 @@ impl GbaSystem {
                 }?;
                 Ok(())
             },
-            0x04000000..=0x04000800 => {
-                self.io_register.write_register(adr & 0x7FE, val)
-                /*self.io[((adr & 0x7FF) >> 2) as usize] = match val {
-                    BusValue::Word(v) => Ok(v),
-                    _ => Err(()),
-                }?;
-                Ok(())*/
-            },
-            0x04000801..=0x04FFFFFF => Err(()),
+            0x04000000..=0x04FFFFFF => self.io_register.write_register(adr & 0xFFFFFF, val),
 
             // Internal display memory
             0x05000000..=0x050003FF => {

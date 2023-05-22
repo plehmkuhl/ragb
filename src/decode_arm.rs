@@ -492,8 +492,8 @@ impl fmt::Display for ArmInstruction {
             },
             ArmInstruction::BranchLinkSuffix{ op } => {
                 match op {
-                    BranchOperation::BranchLinkImmed { offset, lr_correct } => write!(f, "BL {:#x}", offset),
-                    BranchOperation::BranchExchangeLinkThumbImmed { offset } => write!(f, "BLX {:#x}", offset),
+                    BranchOperation::BranchLinkImmed { offset, lr_correct } => write!(f, "BL {:#x}", offset << 1),
+                    BranchOperation::BranchExchangeLinkThumbImmed { offset } => write!(f, "BLX {:#x}", offset << 1),
                     _ => write!(f, "UNKNOWN"),
                 }
             },

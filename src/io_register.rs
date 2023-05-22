@@ -129,6 +129,7 @@ pub struct IORegister {
 impl IORegister {
     pub fn new() -> IORegister {
         IORegister { 
+            sound_bias: 0x200,
             wave_ram_a: vec![0; 4], 
             wave_ram_b: vec![0; 4],
             ..Default::default() 

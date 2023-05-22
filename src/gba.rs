@@ -1,4 +1,7 @@
-use std::collections::VecDeque;
+use std::{collections::VecDeque, fs, io, string::String, os::windows::process};
+
+use bitflags::BitFlags;
+use nom::{multi, number, Finish};
 
 use crate::{
     arm::*, 
@@ -9,6 +12,7 @@ use crate::{
 };
 
 use std::fmt;
+use std::sync::mpsc::Sender;
 
 pub const CPU_TICKS_PER_SECOND: u32 = 16780000; //280896 ; //16780000;
 
@@ -98,6 +102,13 @@ pub enum ExceptionType {
     FIQ,
 }
 
+pub enum VideoEvent {
+    VRamUpdate { start_address: u32, data: Vec<u16> },
+    PRamUpdate { start_address: u32, data: Vec<u16> },
+    ORamUpdate { start_address: u32, data: Vec<u32> },
+    FrameUpdate,
+}
+
 pub struct GbaSystem {
     // Memory (32-Bit bus)
     pub bios:Vec<u32>, 
@@ -145,16 +156,20 @@ pub struct GbaSystem {
 
     // Debug
     pub breakpoints: Vec<(u32, gdbstub_arch::arm::ArmBreakpointKind)>,
+    pub decompile: Vec<String>,
 
     // LCD
     pub lcd_accumulator: u32,
     pub lcd_cur_v: u16,
     pub lcd_cur_h: u16,
+
+    // Synchronization
+    pub video_events: Sender<VideoEvent>,
 }
 
 impl GbaSystem {
     pub fn new
-    () -> GbaSystem {
+    (frame_sender: Sender<VideoEvent>) -> GbaSystem {
         GbaSystem {
             bios: vec![0; 4096],
             iwram: vec![0; 8192],
@@ -183,9 +198,11 @@ impl GbaSystem {
             thumb_instruction_table: generate_thumb_instruction_table(),
             instruction_cache: VecDeque::new(),
             breakpoints: Vec::new(),
+            decompile: vec!["".into(); 0x3FFF],
             lcd_accumulator: 0,
             lcd_cur_h: 0,
             lcd_cur_v: 0,
+            video_events: frame_sender,
         }
     }
 
@@ -418,16 +435,6 @@ impl GbaSystem {
     }
 
     pub fn reset(&mut self) {
-        /*self.r_svc[1] = self.r[15];
-        self.spsr_svc = self.cpsr;
-
-        self.cpsr.set_mode(Mode::Supervisor);
-        self.cpsr.set(ProgramStatus::FLAG_I, true);
-        self.cpsr.set(ProgramStatus::FLAG_F, true);
-        self.cpsr.set(ProgramStatus::FLAG_T, false);
-
-        self.r[15] = 0;*/
-
         self.raise_exception(ExceptionType::Reset);
     }
 
@@ -464,7 +471,7 @@ impl GbaSystem {
             self.cpsr.set(ProgramStatus::FLAG_A, true);
         }
 
-        self.pc = match exception_type {
+        self.write_register(Register::R15, match exception_type {
             ExceptionType::Reset => 0x00000000,
             ExceptionType::UndefinedInstruction => 0x00000004,
             ExceptionType::SoftwareInterrupt => 0x00000008,
@@ -472,7 +479,7 @@ impl GbaSystem {
             ExceptionType::DataAbort => 0x00000010,
             ExceptionType::IRQ => 0x00000018,
             ExceptionType::FIQ => 0x0000001C,
-        };
+        });
     }
 
     fn emulate_cpu(&mut self) -> EmulationResult {
@@ -484,10 +491,10 @@ impl GbaSystem {
             self.pc_dirty = false;
         }
 
-        if self.r[15] > 0x3FFF {
+        /*if self.r[15] > 0x3FFF {
             println!("Leaving rom!");
             return EmulationResult::Exception
-        }
+        }*/
 
         // Fill instruction cache
         while self.instruction_cache.len() < 2 {
@@ -525,7 +532,7 @@ impl GbaSystem {
         match decoded.1 {
             Some(inst) => {
                 //if (self.r[15] - instruction_size * 2) < 0x120 || (self.r[15] - instruction_size * 2) > 0x124 {
-                //println!("{:#08x} {} {}", decoded.0, if self.cpsr.contains(ProgramStatus::FLAG_T) { "T" } else { " " }, inst);
+                println!("{:#08x} {} {} cpsr: {}", decoded.0, if self.cpsr.contains(ProgramStatus::FLAG_T) { "T" } else { " " }, inst, self.cpsr);
                 //}
 
                 /*match inst {
@@ -533,11 +540,32 @@ impl GbaSystem {
                     _ => (),
                 }*/
 
+                //let old_cpsr = self.cpsr;
+
+                /*println!("R0: {:08x} R1: {:08x} R2: {:08x} R3: {:08x}", self.read_register(Register::R0), self.read_register(Register::R1), self.read_register(Register::R2), self.read_register(Register::R3));
+                println!("R4: {:08x} R5: {:08x} R6: {:08x} R7: {:08x}", self.read_register(Register::R4), self.read_register(Register::R5), self.read_register(Register::R6), self.read_register(Register::R7));
+                println!("R8: {:08x} R9: {:08x} R10: {:08x} R11: {:08x}", self.read_register(Register::R8), self.read_register(Register::R9), self.read_register(Register::R10), self.read_register(Register::R11));
+                println!("R12: {:08x} SP: {:08x} LR: {:08x} PC: {:08x}", self.read_register(Register::R12), self.read_register(Register::R13), self.read_register(Register::R14), self.read_register(Register::R15));
+                println!("cpsr: {}", self.cpsr);
+                println!("{:#08x} {} {}", decoded.0, if self.cpsr.contains(ProgramStatus::FLAG_T) { "T" } else { " " }, inst);*/
+
                 ticks = self.execute(&inst);
 
-                assert_ne!(self.read_register(Register::R12), 0x8c000008, "Register trap");
-                assert_ne!(self.read_register(Register::R1), 0x3000089, "Register trap");
-                assert_ne!(self.read_register(Register::R0), 0x8000005, "Register trap");
+                /*if old_cpsr.bits() != self.cpsr.bits() {
+                    println!("{:#08x} {} {}", decoded.0, if self.cpsr.contains(ProgramStatus::FLAG_T) { "T" } else { " " }, inst);
+
+                    assert!(true);
+                } else {
+
+                }*/
+
+                /*if self.decompile[decoded.0 as usize].is_empty() {
+                    self.decompile[decoded.0 as usize] = format!("{:#08x} {} {}", decoded.0, if self.cpsr.contains(ProgramStatus::FLAG_T) { "T" } else { " " }, inst);
+                }*/
+
+                //assert_ne!(self.read_register(Register::R12), 0x8c000008, "Register trap");
+                //assert_ne!(self.read_register(Register::R1), 0x3000089, "Register trap");
+                //assert_ne!(self.read_register(Register::R0), 0x8000005, "Register trap");
 
                 if self.r[15] == 0xfffffffc {
                     self.pc = decoded.0;
@@ -552,6 +580,12 @@ impl GbaSystem {
                 }
             },
             None => {
+                println!("R0: {} R1: {} R2: {} R3: {}", self.read_register(Register::R0), self.read_register(Register::R1), self.read_register(Register::R2), self.read_register(Register::R3));
+                println!("R4: {} R5: {} R6: {} R7: {}", self.read_register(Register::R4), self.read_register(Register::R5), self.read_register(Register::R6), self.read_register(Register::R7));
+                println!("R8: {} R9: {} R10: {} R11: {}", self.read_register(Register::R8), self.read_register(Register::R9), self.read_register(Register::R10), self.read_register(Register::R11));
+                println!("R12: {} SP: {} LR: {} PC: {}", self.read_register(Register::R12), self.read_register(Register::R13), self.read_register(Register::R14), self.read_register(Register::R15));
+                println!("cpsr: {}", self.cpsr);
+
                 println!("Invalid instruction at {:08x}!", decoded.0);
                 self.raise_exception(ExceptionType::UndefinedInstruction);
             },
@@ -597,12 +631,57 @@ impl GbaSystem {
                 self.lcd_cur_v = 0;
                 self.lcd_cur_h = 0;
 
-                
+                println!("Mode: {}, FS: {}, Blank: {}, BG: [{},{},{},{}]", 
+                    self.io_register.disp_cnt & 0x7, 
+                    self.io_register.disp_cnt & 0x10,
+                    (self.io_register.disp_cnt & 0x80) != 0,
+                    (self.io_register.disp_cnt & 0x100) != 0,
+                    (self.io_register.disp_cnt & 0x200) != 0,
+                    (self.io_register.disp_cnt & 0x400) != 0,
+                    (self.io_register.disp_cnt & 0x800) != 0);
+
+                // Send video ram updates
+                let _ = self.video_events.send(VideoEvent::PRamUpdate { start_address: 0, data: self.pram.clone() });
+                let _ = self.video_events.send(VideoEvent::VRamUpdate { start_address: 0, data: self.vram.clone() });
+                let _ = self.video_events.send(VideoEvent::ORamUpdate { start_address: 0, data: self.oam.clone() });
+
+                // Send frame update event
+                let _ = self.video_events.send(VideoEvent::FrameUpdate);
+
+                // Output decompile listing and quit
+                let mut listing = String::new();
+                let mut last_a = 0;
+
+                for (a, l) in self.decompile.iter().enumerate() {
+                    if !l.is_empty() {
+                        if a.abs_diff(last_a) > 4 {
+                            listing.push_str("\n");
+                        }
+
+                        last_a = a;
+                        listing.push_str(format!("{}\n", l).as_str());
+                    }
+                }
+
+                //fs::write("listing.txt", listing);
+                //panic!("Got to first frame!");
             }
 
             self.lcd_accumulator -= 4;
         }
 
         r
+    }
+
+    fn parse_gamepack(data: &[u8]) -> nom::IResult<&[u8], Vec<u16>> {
+        let (i, v) = multi::many0(number::complete::le_u16)(&data[..])?;
+        Ok((i, v))
+    }
+
+    pub fn load_gamepack(&mut self, file_path: &str) -> io::Result<()> {
+        let (_, data) = GbaSystem::parse_gamepack(&(fs::read(file_path)?)[..]).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+        self.pack[0..data.len()].copy_from_slice(&data);
+        
+        Ok(())
     }
 }

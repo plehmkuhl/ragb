@@ -6,6 +6,7 @@ use crate::decode_arm::*;
 
 use bitflags::BitFlags;
 use bitflags::bitflags;
+use std::fmt;
 use std::convert::TryFrom;
 
 pub enum Mode {
@@ -72,6 +73,19 @@ impl ProgramStatus {
             Mode::Undefined => 0b11011,
             Mode::System => 0b11111,
         };
+    }
+}
+
+impl fmt::Display for ProgramStatus {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:08x} [{}{}{}{}{}{}{}]", self.bits() 
+            ,if self.contains(ProgramStatus::FLAG_N) { "N" } else { "-" }
+            ,if self.contains(ProgramStatus::FLAG_Z) { "Z" } else { "-" }
+            ,if self.contains(ProgramStatus::FLAG_C) { "C" } else { "-" }
+            ,if self.contains(ProgramStatus::FLAG_V) { "V" } else { "-" }
+            ,if self.contains(ProgramStatus::FLAG_I) { "I" } else { "-" }
+            ,if self.contains(ProgramStatus::FLAG_F) { "F" } else { "-" }
+            ,if self.contains(ProgramStatus::FLAG_T) { "T" } else { "-" })
     }
 }
 
@@ -353,26 +367,26 @@ impl GbaSystem {
                         if !exclude_first_word && upwards {
                             (
                                 self.read_register(rn), 
-                                self.read_register(rn) + (register_list.count() * 4) - 4,
-                                self.read_register(rn) + (register_list.count() * 4)
+                                self.read_register(rn).wrapping_add(register_list.count() * 4) - 4,
+                                self.read_register(rn).wrapping_add(register_list.count() * 4)
                             )
                         } else if exclude_first_word && upwards {
                             (
-                                self.read_register(rn) + 4, 
-                                self.read_register(rn) + (register_list.count() * 4),
-                                self.read_register(rn) + (register_list.count() * 4)
+                                self.read_register(rn).wrapping_add(4), 
+                                self.read_register(rn).wrapping_add(register_list.count() * 4),
+                                self.read_register(rn).wrapping_add(register_list.count() * 4)
                             )
                         } else if !exclude_first_word && !upwards {
                             (
-                                self.read_register(rn) - (register_list.count() * 4) + 4, 
+                                self.read_register(rn).wrapping_sub(register_list.count() * 4) + 4, 
                                 self.read_register(rn),
-                                self.read_register(rn) - (register_list.count() * 4)
+                                self.read_register(rn).wrapping_sub(register_list.count() * 4)
                             )
                         } else {
                             (
-                                self.read_register(rn) - (register_list.count() * 4), 
-                                self.read_register(rn) - 4,
-                                self.read_register(rn) - (register_list.count() * 4)
+                                self.read_register(rn).wrapping_sub(register_list.count() * 4), 
+                                self.read_register(rn).wrapping_sub(4),
+                                self.read_register(rn).wrapping_sub(register_list.count() * 4)
                             )
                         };
 
@@ -457,100 +471,6 @@ impl GbaSystem {
 
                 4
             },
-            /*&ArmInstruction::Push{ c, r, register_list } => {
-                if self.test_condition(c) {
-                    let mut start_address = self.read_register(Register::R13);
-                    start_address = start_address.wrapping_sub(register_list.count() * 4);
-                    if r { start_address = start_address.wrapping_sub(4) }
-
-                    let mut address = start_address;
-                    for n in register_list {
-                        let register = match n {
-                            RegisterList::FLAG_R0 => Register::R0,
-                            RegisterList::FLAG_R1 => Register::R1,
-                            RegisterList::FLAG_R2 => Register::R2,
-                            RegisterList::FLAG_R3 => Register::R3,
-                            RegisterList::FLAG_R4 => Register::R4,
-                            RegisterList::FLAG_R5 => Register::R5,
-                            RegisterList::FLAG_R6 => Register::R6,
-                            RegisterList::FLAG_R7 => Register::R7,
-                            RegisterList::FLAG_R8 => Register::R8,
-                            RegisterList::FLAG_R9 => Register::R9,
-                            RegisterList::FLAG_R10 => Register::R10,
-                            RegisterList::FLAG_R11 => Register::R11,
-                            RegisterList::FLAG_R12 => Register::R12,
-                            RegisterList::FLAG_R13 => Register::R13,
-                            RegisterList::FLAG_R14 => Register::R14,
-                            RegisterList::FLAG_R15 => Register::R15,
-                            _ => unreachable!(),
-                        };
-
-                        let reg = self.read_register(register);
-
-                        println!("Write bus: {:08x} -> ({}) {:08x}", address, register, self.read_register(register));
-                        self.write_bus(address, BusValue::Word(reg));
-                        address = address.wrapping_add(4);
-                    }
-
-                    if r {
-                        println!("Write bus: {:08x} -> ({}) {:08x}", address, Register::R14, self.read_register(Register::R14));
-                        self.write_bus(address, BusValue::Word(self.read_register(Register::R14)));
-                        address = address.wrapping_add(4);
-                    }
-
-                    self.write_register(Register::R13, start_address);
-                }
-                4
-            },
-            &ArmInstruction::Pop{ c, r, register_list } => {
-                if self.test_condition(c) {
-                    let mut address = self.read_register(Register::R13);
-
-                    for n in register_list {
-                        //println!("Read bus: {:08x}", address);
-                        if let Some(v) = self.read_bus_word(address) {
-                            let register = match n {
-                                RegisterList::FLAG_R0 => Register::R0,
-                                RegisterList::FLAG_R1 => Register::R1,
-                                RegisterList::FLAG_R2 => Register::R2,
-                                RegisterList::FLAG_R3 => Register::R3,
-                                RegisterList::FLAG_R4 => Register::R4,
-                                RegisterList::FLAG_R5 => Register::R5,
-                                RegisterList::FLAG_R6 => Register::R6,
-                                RegisterList::FLAG_R7 => Register::R7,
-                                RegisterList::FLAG_R8 => Register::R8,
-                                RegisterList::FLAG_R9 => Register::R9,
-                                RegisterList::FLAG_R10 => Register::R10,
-                                RegisterList::FLAG_R11 => Register::R11,
-                                RegisterList::FLAG_R12 => Register::R12,
-                                RegisterList::FLAG_R13 => Register::R13,
-                                RegisterList::FLAG_R14 => Register::R14,
-                                RegisterList::FLAG_R15 => Register::R15,
-                                _ => unreachable!(),
-                            };
-
-                            println!("Read bus: {:08x} -> ({}) {:08x}", address, register, v);
-                            self.write_register(register, v);
-                        }
-                        address = address.wrapping_add(4);
-                    }
-
-                    if r {
-                        //println!("Read bus: {:08x}", address);
-                        if let Some(v) = self.read_bus_word(address) {
-                            println!("Read bus: {:08x} -> ({}) {:08x}", address, Register::R15, v);
-
-                            self.write_register(Register::R15, v & 0xFFFFFFFE);
-                            self.cpsr.set(ProgramStatus::FLAG_T, (v & 0x1) != 0 );
-                        }
-
-                        address = address.wrapping_add(4);
-                    }
-
-                    self.write_register(Register::R13, address);
-                }
-                4
-            },*/
             &ArmInstruction::BranchLinkPrefix { offset } => {
                 self.write_register(Register::R14, 
                     self.read_register(Register::R15)
